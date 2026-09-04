@@ -1,0 +1,8 @@
+{
+  "tasksFolder": "Tasks",
+  "defaultEstimatedHours": 8,
+  "defaultPriority": "medium",
+  "costCenters": [],
+  "taskTypes": [],
+  "activeTimer": null
+}
