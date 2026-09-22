@@ -1,0 +1,6 @@
+# Node dependencies (plugin build tooling)
+node_modules/
+
+# OS/editor cruft
+.DS_Store
+Thumbs.db
