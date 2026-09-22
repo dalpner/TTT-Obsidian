@@ -1793,28 +1793,50 @@ var ImportSuperProductivityModal = class extends import_obsidian7.Modal {
     this.render();
   }
   async autoDetectBackup(fileLabel) {
-    const backupDir = (0, import_obsidian7.normalizePath)(
-      "~/.var/app/com.super_productivity.SuperProductivity/config/superProductivity/backups"
-    );
-    const expandedPath = "/home/" + (typeof process !== "undefined" ? process.env.USER || "user" : "user") + "/.var/app/com.super_productivity.SuperProductivity/config/superProductivity/backups";
-    new import_obsidian7.Notice(`Backup-Ordner: ${expandedPath}
-Bitte neuste Datei manuell w\xE4hlen.`, 8e3);
+    const candidatePaths = [];
+    const home = typeof process !== "undefined" ? process.env.HOME || process.env.USERPROFILE : void 0;
+    if (home) {
+      candidatePaths.push(
+        (0, import_obsidian7.normalizePath)(`${home}/.var/app/com.super_productivity.SuperProductivity/config/superProductivity/backups`),
+        // Linux (Flatpak)
+        (0, import_obsidian7.normalizePath)(`${home}/.config/superProductivity/backups`),
+        // Linux
+        (0, import_obsidian7.normalizePath)(`${home}/Library/Application Support/superProductivity/backups`),
+        // macOS
+        (0, import_obsidian7.normalizePath)(`${home}/AppData/Roaming/superProductivity/backups`)
+        // Windows
+      );
+    }
+    let loaded = false;
     try {
       const adapter = this.app.vault.adapter;
       if (adapter && typeof adapter.list === "function") {
-        const result = await adapter.list(expandedPath);
-        if (result && result.files && result.files.length > 0) {
-          const sorted = result.files.sort().reverse();
-          const latest = sorted[0];
-          const content = await adapter.read(latest);
-          this.rawContent = content;
-          this.fileName = latest.split("/").pop() || latest;
-          fileLabel.setText(this.fileName);
-          await this.parseAndPreview();
-          new import_obsidian7.Notice(`\u2705 Backup geladen: ${this.fileName}`);
+        for (const path of candidatePaths) {
+          try {
+            const result = await adapter.list(path);
+            if (result && result.files && result.files.length > 0) {
+              const sorted = result.files.sort().reverse();
+              const latest = sorted[0];
+              const content = await adapter.read(latest);
+              this.rawContent = content;
+              this.fileName = latest.split("/").pop() || latest;
+              fileLabel.setText(this.fileName);
+              await this.parseAndPreview();
+              new import_obsidian7.Notice(`\u2705 Backup geladen: ${this.fileName}`);
+              loaded = true;
+              break;
+            }
+          } catch (e) {
+          }
         }
       }
     } catch (e) {
+    }
+    if (!loaded) {
+      new import_obsidian7.Notice(
+        "Kein Backup-Ordner automatisch gefunden (\xFCblicherweise au\xDFerhalb des Vaults). Bitte Datei manuell w\xE4hlen.",
+        8e3
+      );
     }
   }
   async executeImport(importBtn) {

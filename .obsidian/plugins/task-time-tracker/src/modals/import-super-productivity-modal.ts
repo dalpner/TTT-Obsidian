@@ -262,38 +262,53 @@ export class ImportSuperProductivityModal extends Modal {
 	}
 
 	private async autoDetectBackup(fileLabel: HTMLElement) {
-		const backupDir = normalizePath(
-			"~/.var/app/com.super_productivity.SuperProductivity/config/superProductivity/backups"
-		);
+		// Common Super Productivity backup export locations across platforms.
+		// These are best-effort hints; the vault adapter can only browse paths
+		// inside the vault, so most desktop installs require manual selection.
+		const candidatePaths: string[] = [];
+		const home = typeof process !== "undefined" ? (process.env.HOME || process.env.USERPROFILE) : undefined;
+		if (home) {
+			candidatePaths.push(
+				normalizePath(`${home}/.var/app/com.super_productivity.SuperProductivity/config/superProductivity/backups`), // Linux (Flatpak)
+				normalizePath(`${home}/.config/superProductivity/backups`), // Linux
+				normalizePath(`${home}/Library/Application Support/superProductivity/backups`), // macOS
+				normalizePath(`${home}/AppData/Roaming/superProductivity/backups`) // Windows
+			);
+		}
 
-		// Try to read via adapter (only works if inside vault — usually won't)
-		// Instead, we inform the user about the path and suggest drag-drop
-		const expandedPath =
-			"/home/" +
-			(typeof process !== "undefined" ? process.env.USER || "user" : "user") +
-			"/.var/app/com.super_productivity.SuperProductivity/config/superProductivity/backups";
-
-		new Notice(`Backup-Ordner: ${expandedPath}\nBitte neuste Datei manuell wählen.`, 8000);
-
-		// Try to load via adapter if the path is inside vault
-		// (This path is outside vault, so we use the fs adapter via adapter.read if available)
+		let loaded = false;
 		try {
 			const adapter = this.app.vault.adapter as any;
 			if (adapter && typeof adapter.list === "function") {
-				const result = await adapter.list(expandedPath);
-				if (result && result.files && result.files.length > 0) {
-					const sorted = result.files.sort().reverse();
-					const latest = sorted[0];
-					const content = await adapter.read(latest);
-					this.rawContent = content;
-					this.fileName = latest.split("/").pop() || latest;
-					fileLabel.setText(this.fileName);
-					await this.parseAndPreview();
-					new Notice(`✅ Backup geladen: ${this.fileName}`);
+				for (const path of candidatePaths) {
+					try {
+						const result = await adapter.list(path);
+						if (result && result.files && result.files.length > 0) {
+							const sorted = result.files.sort().reverse();
+							const latest = sorted[0];
+							const content = await adapter.read(latest);
+							this.rawContent = content;
+							this.fileName = latest.split("/").pop() || latest;
+							fileLabel.setText(this.fileName);
+							await this.parseAndPreview();
+							new Notice(`✅ Backup geladen: ${this.fileName}`);
+							loaded = true;
+							break;
+						}
+					} catch (e) {
+						// Path not accessible from vault adapter — try next candidate
+					}
 				}
 			}
 		} catch (e) {
-			// Silently fail — user can still use file picker
+			// Silently fall through to manual selection
+		}
+
+		if (!loaded) {
+			new Notice(
+				"Kein Backup-Ordner automatisch gefunden (üblicherweise außerhalb des Vaults). Bitte Datei manuell wählen.",
+				8000
+			);
 		}
 	}
 

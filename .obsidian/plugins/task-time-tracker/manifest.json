@@ -4,6 +4,6 @@
   "version": "1.0.0",
   "minAppVersion": "0.15.0",
   "description": "Umfassender Task-Tracker mit Kalender, Multi-Day-Support, Zeiterfassung, Historie und flexiblen Auswertungen.",
-  "author": "Antigravity",
+  "author": "dalpner",
   "isDesktopOnly": false
 }
