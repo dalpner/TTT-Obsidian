@@ -91,6 +91,20 @@ export class SuperProductivityImporter {
 			data = content;
 		}
 
+		// Unwrap full backup export format: { timestamp, lastUpdate, crossModelVersion, data: { task, project, ... } }
+		if (
+			data &&
+			typeof data === "object" &&
+			data.data &&
+			typeof data.data === "object" &&
+			!data.task &&
+			!Array.isArray(data) &&
+			!data.tasks &&
+			(data.data.task || data.data.project || data.data.taskArchive)
+		) {
+			data = data.data;
+		}
+
 		// 1. Resolve Projects
 		const projectMap = new Map<string, string>();
 		if (data.project && data.project.entities) {

@@ -1266,6 +1266,9 @@ var SuperProductivityImporter = class {
     } else {
       data = content;
     }
+    if (data && typeof data === "object" && data.data && typeof data.data === "object" && !data.task && !Array.isArray(data) && !data.tasks && (data.data.task || data.data.project || data.data.taskArchive)) {
+      data = data.data;
+    }
     const projectMap = /* @__PURE__ */ new Map();
     if (data.project && data.project.entities) {
       for (const [id, p] of Object.entries(data.project.entities)) {
