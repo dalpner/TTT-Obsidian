@@ -36,7 +36,8 @@ var DEFAULT_SETTINGS = {
   defaultPriority: "medium",
   costCenters: ["KST-1000", "KST-2000", "KST-3000", "KST-4020", "Allgemein"],
   taskTypes: ["Feature", "Bug", "Meeting", "Konzeption", "Wartung", "Dokumentation", "Support"],
-  activeTimer: null
+  activeTimer: null,
+  cockpitMaxVisibleItems: 20
 };
 
 // src/services/task-service.ts
@@ -2059,9 +2060,30 @@ var CockpitView = class {
       });
       return;
     }
+    const cards = [];
     for (const task of filtered) {
-      this.renderTaskCard(container, task);
+      cards.push(this.renderTaskCard(container, task));
     }
+    this.applyScrollLimit(container, cards);
+  }
+  /**
+   * Begrenzt die sichtbare Höhe der Aufgabenliste auf die in den Einstellungen
+   * konfigurierte Anzahl an Karten und aktiviert bei Bedarf eine Scroll-Funktion,
+   * damit die Datei bei vielen Aufgaben nicht endlos lang wird.
+   */
+  applyScrollLimit(container, cards) {
+    const maxItems = this.getSettings().cockpitMaxVisibleItems;
+    if (!maxItems || maxItems <= 0 || cards.length <= maxItems) {
+      container.removeClass("ttt-task-list-scrollable");
+      container.style.maxHeight = "";
+      return;
+    }
+    container.addClass("ttt-task-list-scrollable");
+    const containerRect = container.getBoundingClientRect();
+    const lastVisibleCard = cards[maxItems - 1];
+    const cardRect = lastVisibleCard.getBoundingClientRect();
+    const maxHeight = cardRect.bottom - containerRect.top;
+    container.style.maxHeight = `${Math.max(maxHeight, 0)}px`;
   }
   renderTaskCard(container, task) {
     const card = container.createDiv({
@@ -2197,6 +2219,7 @@ var CockpitView = class {
     openNoteBtn.addEventListener("click", () => {
       this.app.workspace.getLeaf(false).openFile(task.file);
     });
+    return card;
   }
 };
 
@@ -3290,6 +3313,18 @@ var TaskTimeTrackerSettingTab = class extends import_obsidian11.PluginSettingTab
         await this.plugin.saveSettings();
       });
       text.inputEl.rows = 2;
+    });
+    new import_obsidian11.Setting(containerEl).setName("Max. sichtbare Aufgaben im Cockpit").setDesc("Maximale Anzahl an Aufgabenkarten, die in der Cockpit-Ansicht ohne Scrollen angezeigt werden. Bei mehr Aufgaben wird die Liste scrollbar. 0 = unbegrenzt (kein Scrollen).").addText((text) => {
+      text.inputEl.type = "number";
+      text.inputEl.min = "0";
+      text.setValue(String(this.plugin.settings.cockpitMaxVisibleItems)).onChange(async (val) => {
+        const num = parseInt(val, 10);
+        if (!isNaN(num) && num >= 0) {
+          this.plugin.settings.cockpitMaxVisibleItems = num;
+          await this.plugin.saveSettings();
+          this.plugin.taskService.notifyChange();
+        }
+      });
     });
   }
 };
