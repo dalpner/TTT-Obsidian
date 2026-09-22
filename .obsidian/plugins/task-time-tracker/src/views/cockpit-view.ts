@@ -5,6 +5,7 @@ import { TaskItem, TaskStatus, PluginSettings, ViewTab } from "../types";
 import { CreateTaskModal } from "../modals/create-task-modal";
 import { LogTimeModal } from "../modals/log-time-modal";
 import { ManageTaskEntriesModal } from "../modals/manage-task-entries-modal";
+import { ImportSuperProductivityModal } from "../modals/import-super-productivity-modal";
 
 export class CockpitView {
 	private app: App;
@@ -76,6 +77,15 @@ export class CockpitView {
 			});
 			logTimeBtn.addEventListener("click", () => {
 				new LogTimeModal(this.app, this.taskService, undefined, undefined, undefined, undefined, () => this.render()).open();
+			});
+
+			const importSpBtn = buttonGroup.createEl("button", {
+				text: "📥 SP-Import",
+				cls: "ttt-btn-secondary"
+			});
+			importSpBtn.setAttribute("aria-label", "Super Productivity Export importieren");
+			importSpBtn.addEventListener("click", () => {
+				new ImportSuperProductivityModal(this.app, this.taskService, this.getSettings, () => this.render()).open();
 			});
 
 			const calBtn = buttonGroup.createEl("button", { text: "📅 Kalender", cls: "ttt-btn-nav" });

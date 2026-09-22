@@ -1,5 +1,6 @@
 import { App, TFile, TFolder, normalizePath, parseYaml } from "obsidian";
 import { TaskItem, TaskFrontmatter, TimeEntry, TaskStatus, TaskPriority, PluginSettings } from "../types";
+import { ConvertedTask, SPImportOptions } from "./super-productivity-importer";
 
 export class TaskService {
 	private app: App;
@@ -469,5 +470,91 @@ ${params.notes ? params.notes : "## Notizen\n- "}
 			}
 		}
 		return Math.round(total * 100) / 100;
+	}
+
+	public async saveImportedTasks(
+		tasks: ConvertedTask[],
+		options: Partial<SPImportOptions>
+	): Promise<{ created: number; merged: number; skipped: number }> {
+		const folder = normalizePath(options.targetFolder || this.getSettings().tasksFolder);
+		await this.ensureFolder(folder);
+
+		this.isInternalUpdating = true;
+		let created = 0, merged = 0, skipped = 0;
+
+		try {
+			for (const task of tasks) {
+				const sanitized = task.title.replace(/[\\/:*?"<>|]/g, "-").trim();
+				const fullPath = normalizePath(`${folder}/${sanitized}.md`);
+				const existing = this.app.vault.getAbstractFileByPath(fullPath);
+
+				if (existing instanceof TFile && options.duplicateHandling === "skip") {
+					skipped++;
+					continue;
+				}
+
+				if (existing instanceof TFile && options.duplicateHandling === "merge_times") {
+					await this.app.fileManager.processFrontMatter(existing, (fm: TaskFrontmatter) => {
+						if (!Array.isArray(fm.time_entries)) fm.time_entries = [];
+						for (const entry of task.time_entries) {
+							const dup = fm.time_entries.find(
+								(e: TimeEntry) => e.date === entry.date && Math.abs((e.hours || 0) - entry.hours) < 0.01
+							);
+							if (!dup) fm.time_entries.push(entry);
+						}
+					});
+					merged++;
+					continue;
+				}
+
+				// Build YAML content
+				const tagsYaml =
+					task.tags.length > 0 ? `\n  - ${task.tags.join("\n  - ")}` : " []";
+				const entriesYaml =
+					task.time_entries.length > 0
+						? task.time_entries
+								.map(
+									(e) =>
+										`  - id: "${e.id}"\n    date: "${e.date}"\n    hours: ${e.hours}${
+											e.comment ? `\n    comment: "${e.comment.replace(/"/g, '\\"')}"` : ""
+										}`
+								)
+								.join("\n")
+						: "";
+
+				const uniqueId = `imported-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`;
+				const content =
+					`---\n` +
+					`id: "${uniqueId}"\n` +
+					`title: "${task.title.replace(/"/g, '\\"')}"\n` +
+					`status: "${task.status}"\n` +
+					`priority: "${task.priority}"\n` +
+					`wichtig: ${task.wichtig}\n` +
+					`typ: "${task.typ}"\n` +
+					`kostenstelle: "${task.kostenstelle}"\n` +
+					`tags:${tagsYaml}\n` +
+					(task.start_date ? `start_date: "${task.start_date}"\n` : "") +
+					(task.due_date ? `due_date: "${task.due_date}"\n` : "") +
+					(task.estimated_hours ? `estimated_hours: ${task.estimated_hours}\n` : "") +
+					`time_entries:\n${entriesYaml}\n` +
+					`---\n\n` +
+					`# ${task.title}\n\n` +
+					(task.notes ? `${task.notes}\n` : `## Notizen\n- \n`);
+
+				if (existing instanceof TFile) {
+					await this.app.vault.modify(existing, content);
+				} else {
+					await this.app.vault.create(fullPath, content);
+				}
+				created++;
+			}
+
+			this.notifyChange();
+			return { created, merged, skipped };
+		} finally {
+			setTimeout(() => {
+				this.isInternalUpdating = false;
+			}, 300);
+		}
 	}
 }

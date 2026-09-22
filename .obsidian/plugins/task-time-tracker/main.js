@@ -27,7 +27,7 @@ __export(main_exports, {
   default: () => TaskTimeTrackerPlugin
 });
 module.exports = __toCommonJS(main_exports);
-var import_obsidian10 = require("obsidian");
+var import_obsidian11 = require("obsidian");
 
 // src/types.ts
 var DEFAULT_SETTINGS = {
@@ -446,6 +446,79 @@ ${params.notes ? params.notes : "## Notizen\n- "}
     }
     return Math.round(total * 100) / 100;
   }
+  async saveImportedTasks(tasks, options) {
+    const folder = (0, import_obsidian.normalizePath)(options.targetFolder || this.getSettings().tasksFolder);
+    await this.ensureFolder(folder);
+    this.isInternalUpdating = true;
+    let created = 0, merged = 0, skipped = 0;
+    try {
+      for (const task of tasks) {
+        const sanitized = task.title.replace(/[\\/:*?"<>|]/g, "-").trim();
+        const fullPath = (0, import_obsidian.normalizePath)(`${folder}/${sanitized}.md`);
+        const existing = this.app.vault.getAbstractFileByPath(fullPath);
+        if (existing instanceof import_obsidian.TFile && options.duplicateHandling === "skip") {
+          skipped++;
+          continue;
+        }
+        if (existing instanceof import_obsidian.TFile && options.duplicateHandling === "merge_times") {
+          await this.app.fileManager.processFrontMatter(existing, (fm) => {
+            if (!Array.isArray(fm.time_entries)) fm.time_entries = [];
+            for (const entry of task.time_entries) {
+              const dup = fm.time_entries.find(
+                (e) => e.date === entry.date && Math.abs((e.hours || 0) - entry.hours) < 0.01
+              );
+              if (!dup) fm.time_entries.push(entry);
+            }
+          });
+          merged++;
+          continue;
+        }
+        const tagsYaml = task.tags.length > 0 ? `
+  - ${task.tags.join("\n  - ")}` : " []";
+        const entriesYaml = task.time_entries.length > 0 ? task.time_entries.map(
+          (e) => `  - id: "${e.id}"
+    date: "${e.date}"
+    hours: ${e.hours}${e.comment ? `
+    comment: "${e.comment.replace(/"/g, '\\"')}"` : ""}`
+        ).join("\n") : "";
+        const uniqueId = `imported-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`;
+        const content = `---
+id: "${uniqueId}"
+title: "${task.title.replace(/"/g, '\\"')}"
+status: "${task.status}"
+priority: "${task.priority}"
+wichtig: ${task.wichtig}
+typ: "${task.typ}"
+kostenstelle: "${task.kostenstelle}"
+tags:${tagsYaml}
+` + (task.start_date ? `start_date: "${task.start_date}"
+` : "") + (task.due_date ? `due_date: "${task.due_date}"
+` : "") + (task.estimated_hours ? `estimated_hours: ${task.estimated_hours}
+` : "") + `time_entries:
+${entriesYaml}
+---
+
+# ${task.title}
+
+` + (task.notes ? `${task.notes}
+` : `## Notizen
+- 
+`);
+        if (existing instanceof import_obsidian.TFile) {
+          await this.app.vault.modify(existing, content);
+        } else {
+          await this.app.vault.create(fullPath, content);
+        }
+        created++;
+      }
+      this.notifyChange();
+      return { created, merged, skipped };
+    } finally {
+      setTimeout(() => {
+        this.isInternalUpdating = false;
+      }, 300);
+    }
+  }
 };
 
 // src/services/timer-service.ts
@@ -604,10 +677,10 @@ var TimerService = class {
 };
 
 // src/views/tracker-view.ts
-var import_obsidian9 = require("obsidian");
+var import_obsidian10 = require("obsidian");
 
 // src/views/cockpit-view.ts
-var import_obsidian7 = require("obsidian");
+var import_obsidian8 = require("obsidian");
 
 // src/modals/create-task-modal.ts
 var import_obsidian3 = require("obsidian");
@@ -1162,6 +1235,608 @@ var ManageTaskEntriesModal = class extends import_obsidian6.Modal {
   }
 };
 
+// src/modals/import-super-productivity-modal.ts
+var import_obsidian7 = require("obsidian");
+
+// src/services/super-productivity-importer.ts
+var DEFAULT_IMPORT_OPTIONS = {
+  targetFolder: "Tasks",
+  consolidateDuplicates: true,
+  subtaskStrategy: "merge_into_parent",
+  includeArchived: true,
+  duplicateHandling: "merge_times",
+  projectAsType: true,
+  recognizeCostCenter: true,
+  recognizeImportant: true,
+  minHoursFilter: 0
+};
+var SuperProductivityImporter = class {
+  /**
+   * Parses Super Productivity JSON (full backup or task list) and creates converted tasks.
+   */
+  static parse(content, options = {}) {
+    const opts = { ...DEFAULT_IMPORT_OPTIONS, ...options };
+    let data;
+    if (typeof content === "string") {
+      try {
+        data = JSON.parse(content);
+      } catch (err) {
+        throw new Error(`Ung\xFCltige JSON-Datei: ${(err == null ? void 0 : err.message) || err}`);
+      }
+    } else {
+      data = content;
+    }
+    const projectMap = /* @__PURE__ */ new Map();
+    if (data.project && data.project.entities) {
+      for (const [id, p] of Object.entries(data.project.entities)) {
+        if (p && p.title && id !== "INBOX_PROJECT") {
+          projectMap.set(id, String(p.title).trim());
+        }
+      }
+    }
+    const tagMap = /* @__PURE__ */ new Map();
+    if (data.tag && data.tag.entities) {
+      for (const [id, t] of Object.entries(data.tag.entities)) {
+        if (t && t.title) {
+          tagMap.set(id, String(t.title).trim());
+        }
+      }
+    }
+    const rawTasksMap = /* @__PURE__ */ new Map();
+    const collectFromTaskState = (taskState) => {
+      if (!taskState || !taskState.entities) return;
+      const ids = taskState.ids || Object.keys(taskState.entities);
+      for (const id of ids) {
+        const t = taskState.entities[id];
+        if (t && t.id && t.title) {
+          rawTasksMap.set(t.id, t);
+        }
+      }
+    };
+    if (data.task) {
+      collectFromTaskState(data.task);
+    } else if (Array.isArray(data)) {
+      for (const t of data) {
+        if (t && t.id && t.title) rawTasksMap.set(t.id, t);
+      }
+    } else if (data.tasks && Array.isArray(data.tasks)) {
+      for (const t of data.tasks) {
+        if (t && t.id && t.title) rawTasksMap.set(t.id, t);
+      }
+    }
+    if (opts.includeArchived) {
+      if (data.taskArchive) collectFromTaskState(data.taskArchive);
+      if (data.archiveYoung && data.archiveYoung.task) collectFromTaskState(data.archiveYoung.task);
+      if (data.archiveOld && data.archiveOld.task) collectFromTaskState(data.archiveOld.task);
+    }
+    const totalRawTasks = rawTasksMap.size;
+    if (totalRawTasks === 0) {
+      throw new Error("Keine Aufgaben in der Super-Productivity-Datei gefunden.");
+    }
+    const parentTasks = [];
+    const subtasksByParentId = /* @__PURE__ */ new Map();
+    const standaloneSubtasks = [];
+    for (const task of rawTasksMap.values()) {
+      if (task.parentId) {
+        const list = subtasksByParentId.get(task.parentId) || [];
+        list.push(task);
+        subtasksByParentId.set(task.parentId, list);
+      } else {
+        parentTasks.push(task);
+      }
+    }
+    for (const [parentId, subList] of subtasksByParentId.entries()) {
+      if (!rawTasksMap.has(parentId)) {
+        for (const s of subList) standaloneSubtasks.push(s);
+      }
+    }
+    const intermediateList = [];
+    for (const pTask of parentTasks) {
+      const subtasks = subtasksByParentId.get(pTask.id) || [];
+      const converted = this.convertSingleTask(pTask, subtasks, projectMap, tagMap, opts);
+      if (converted) {
+        intermediateList.push(converted);
+      }
+      if (opts.subtaskStrategy === "separate_tasks" && subtasks.length > 0) {
+        for (const s of subtasks) {
+          const sConverted = this.convertSingleTask(
+            { ...s, title: `${pTask.title} - ${s.title}` },
+            [],
+            projectMap,
+            tagMap,
+            opts
+          );
+          if (sConverted) intermediateList.push(sConverted);
+        }
+      }
+    }
+    for (const s of standaloneSubtasks) {
+      const sConverted = this.convertSingleTask(s, [], projectMap, tagMap, opts);
+      if (sConverted) intermediateList.push(sConverted);
+    }
+    let finalList = [];
+    if (opts.consolidateDuplicates) {
+      finalList = this.consolidateTasks(intermediateList);
+    } else {
+      finalList = intermediateList;
+    }
+    let tasksWithTime = 0;
+    let totalHours = 0;
+    let earliestDate;
+    let latestDate;
+    const projectSet = /* @__PURE__ */ new Set();
+    const tagSet = /* @__PURE__ */ new Set();
+    for (const t of finalList) {
+      if (t.time_entries.length > 0) {
+        tasksWithTime++;
+        for (const entry of t.time_entries) {
+          totalHours += entry.hours || 0;
+          if (!earliestDate || entry.date < earliestDate) earliestDate = entry.date;
+          if (!latestDate || entry.date > latestDate) latestDate = entry.date;
+        }
+      }
+      if (t.typ && t.typ !== "Allgemein" && t.typ !== "Feature") {
+        projectSet.add(t.typ);
+      }
+      for (const tag of t.tags) {
+        tagSet.add(tag);
+      }
+    }
+    return {
+      totalRawTasks,
+      totalResultTasks: finalList.length,
+      tasksWithTime,
+      totalHours: Math.round(totalHours * 100) / 100,
+      earliestDate,
+      latestDate,
+      projects: Array.from(projectSet).sort(),
+      tags: Array.from(tagSet).sort(),
+      convertedTasks: finalList
+    };
+  }
+  static convertSingleTask(task, subtasks, projectMap, tagMap, opts) {
+    const title = this.sanitizeTaskTitle(task.title);
+    if (!title) return null;
+    const timeEntries = [];
+    let minDate = task.dueDay || void 0;
+    let maxDate = task.dueDay || void 0;
+    if (task.timeSpentOnDay && typeof task.timeSpentOnDay === "object") {
+      for (const [dateStr, ms] of Object.entries(task.timeSpentOnDay)) {
+        if (typeof ms === "number" && ms > 0) {
+          const hours = Math.round(ms / 36e5 * 100) / 100;
+          if (hours > 0) {
+            timeEntries.push({
+              id: `entry-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`,
+              date: dateStr,
+              hours,
+              comment: "Super-Productivity"
+            });
+            if (!minDate || dateStr < minDate) minDate = dateStr;
+            if (!maxDate || dateStr > maxDate) maxDate = dateStr;
+          }
+        }
+      }
+    }
+    const subtaskNotes = [];
+    if (opts.subtaskStrategy === "merge_into_parent" && subtasks.length > 0) {
+      for (const s of subtasks) {
+        const checkMark = s.isDone ? "[x]" : "[ ]";
+        subtaskNotes.push(`- ${checkMark} ${s.title}`);
+        if (s.timeSpentOnDay && typeof s.timeSpentOnDay === "object") {
+          for (const [dateStr, ms] of Object.entries(s.timeSpentOnDay)) {
+            if (typeof ms === "number" && ms > 0) {
+              const hours = Math.round(ms / 36e5 * 100) / 100;
+              if (hours > 0) {
+                timeEntries.push({
+                  id: `entry-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`,
+                  date: dateStr,
+                  hours,
+                  comment: s.title
+                });
+                if (!minDate || dateStr < minDate) minDate = dateStr;
+                if (!maxDate || dateStr > maxDate) maxDate = dateStr;
+              }
+            }
+          }
+        }
+      }
+    }
+    let typ = "Feature";
+    if (opts.projectAsType && task.projectId && projectMap.has(task.projectId)) {
+      typ = projectMap.get(task.projectId);
+    }
+    const tags = [];
+    let kostenstelle = "Allgemein";
+    let wichtig = false;
+    if (task.tagIds && Array.isArray(task.tagIds)) {
+      for (const tagId of task.tagIds) {
+        const tagName = tagMap.get(tagId) || tagId;
+        const lower = tagName.toLowerCase();
+        if (opts.recognizeImportant && (lower === "important" || lower === "em_important" || lower === "dringend")) {
+          wichtig = true;
+          continue;
+        }
+        if (opts.recognizeCostCenter && (lower.includes("ccc") || lower.startsWith("kst") || /^\d{4,}/.test(tagName))) {
+          if (lower.includes("ccc")) {
+            kostenstelle = "CCC";
+          } else {
+            kostenstelle = tagName;
+          }
+        }
+        const sanitizedTag = tagName.replace(/[\\/:*?"<>|#]/g, "").trim().replace(/\s+/g, "-");
+        if (sanitizedTag && !tags.includes(sanitizedTag)) {
+          tags.push(sanitizedTag);
+        }
+      }
+    }
+    if (task.projectId && projectMap.has(task.projectId)) {
+      const pName = projectMap.get(task.projectId).replace(/[\\/:*?"<>|#]/g, "").trim().replace(/\s+/g, "-");
+      if (pName && !tags.includes(pName)) {
+        tags.push(pName);
+      }
+    }
+    let estimated_hours;
+    if (task.timeEstimate && task.timeEstimate > 0) {
+      estimated_hours = Math.round(task.timeEstimate / 36e5 * 10) / 10;
+    }
+    let status = "todo";
+    if (task.isDone) {
+      status = "done";
+    } else if (timeEntries.length > 0 || task.timeSpent && task.timeSpent > 0) {
+      status = "in_progress";
+    }
+    let startDate = minDate;
+    if (!startDate && task.created) {
+      startDate = new Date(task.created).toISOString().slice(0, 10);
+    }
+    let dueDate = maxDate || task.dueDay || void 0;
+    let notes = task.notes ? task.notes.trim() : "";
+    if (subtaskNotes.length > 0) {
+      notes += `
+
+### Teilaufgaben (Super Productivity)
+${subtaskNotes.join("\n")}`;
+    }
+    return {
+      title,
+      status,
+      priority: wichtig ? "high" : "medium",
+      wichtig,
+      typ,
+      kostenstelle,
+      tags,
+      start_date: startDate,
+      due_date: dueDate,
+      estimated_hours,
+      time_entries: timeEntries,
+      notes: notes.trim() ? notes : void 0,
+      originalId: task.id
+    };
+  }
+  /**
+   * Consolidates repeating tasks (e.g. 16 instances of "CCC Monday Power-Up")
+   * into a single task note with all time entries across the days.
+   */
+  static consolidateTasks(tasks) {
+    var _a, _b;
+    const groupMap = /* @__PURE__ */ new Map();
+    for (const t of tasks) {
+      const key = `${t.title.toLowerCase()}___${t.typ.toLowerCase()}`;
+      const existing = groupMap.get(key);
+      if (!existing) {
+        groupMap.set(key, {
+          ...t,
+          tags: [...t.tags],
+          time_entries: [...t.time_entries]
+        });
+      } else {
+        for (const entry of t.time_entries) {
+          const sameDate = existing.time_entries.find((e) => e.date === entry.date);
+          if (sameDate) {
+            sameDate.hours = Math.round((sameDate.hours + entry.hours) * 100) / 100;
+            if (entry.comment && !((_a = sameDate.comment) == null ? void 0 : _a.includes(entry.comment))) {
+              sameDate.comment = `${sameDate.comment || ""} / ${entry.comment}`.trim().replace(/^\/\s*/, "");
+            }
+          } else {
+            existing.time_entries.push(entry);
+          }
+        }
+        for (const tag of t.tags) {
+          if (!existing.tags.includes(tag)) existing.tags.push(tag);
+        }
+        if (t.wichtig) {
+          existing.wichtig = true;
+          existing.priority = "high";
+        }
+        if (t.kostenstelle && t.kostenstelle !== "Allgemein") {
+          existing.kostenstelle = t.kostenstelle;
+        }
+        if (t.estimated_hours && (!existing.estimated_hours || t.estimated_hours > existing.estimated_hours)) {
+          existing.estimated_hours = t.estimated_hours;
+        }
+        if (t.start_date && (!existing.start_date || t.start_date < existing.start_date)) {
+          existing.start_date = t.start_date;
+        }
+        if (t.due_date && (!existing.due_date || t.due_date > existing.due_date)) {
+          existing.due_date = t.due_date;
+        }
+        if (t.status === "in_progress" || existing.status === "in_progress") {
+          existing.status = "in_progress";
+        } else if (t.status === "todo" && existing.status === "done") {
+          existing.status = "todo";
+        }
+        if (t.notes && !((_b = existing.notes) == null ? void 0 : _b.includes(t.notes))) {
+          existing.notes = existing.notes ? `${existing.notes}
+
+---
+${t.notes}` : t.notes;
+        }
+      }
+    }
+    for (const t of groupMap.values()) {
+      t.time_entries.sort((a, b) => b.date.localeCompare(a.date));
+    }
+    return Array.from(groupMap.values());
+  }
+  static sanitizeTaskTitle(title) {
+    return title.replace(/[\\/:*?"<>|]/g, "-").replace(/\s+/g, " ").trim();
+  }
+};
+
+// src/modals/import-super-productivity-modal.ts
+var ImportSuperProductivityModal = class extends import_obsidian7.Modal {
+  constructor(app, taskService, getSettings, onImportDone) {
+    super(app);
+    this.preview = null;
+    this.rawContent = null;
+    this.fileName = "";
+    this.taskService = taskService;
+    this.getSettings = getSettings;
+    this.onImportDone = onImportDone;
+    this.options = { ...DEFAULT_IMPORT_OPTIONS, targetFolder: getSettings().tasksFolder };
+  }
+  onOpen() {
+    const { contentEl } = this;
+    contentEl.addClass("ttt-import-modal");
+    this.render();
+  }
+  onClose() {
+    this.contentEl.empty();
+  }
+  render() {
+    const { contentEl } = this;
+    contentEl.empty();
+    contentEl.createEl("h2", { text: "\u{1F4E5} Super Productivity Importieren" });
+    contentEl.createEl("p", {
+      text: "Importiere Aufgaben und Zeitbuchungen aus einem Super Productivity Backup (JSON).",
+      cls: "ttt-import-desc"
+    });
+    const fileSection = contentEl.createDiv({ cls: "ttt-import-section" });
+    fileSection.createEl("h3", { text: "1. Backup-Datei w\xE4hlen" });
+    const fileRow = fileSection.createDiv({ cls: "ttt-import-file-row" });
+    const fileInput = fileRow.createEl("input", { type: "file" });
+    fileInput.accept = ".json";
+    fileInput.style.display = "none";
+    const chooseBtn = fileRow.createEl("button", {
+      text: "\u{1F4C2} Datei w\xE4hlen\u2026",
+      cls: "ttt-btn-secondary"
+    });
+    const fileLabel = fileRow.createEl("span", {
+      text: "Keine Datei gew\xE4hlt",
+      cls: "ttt-import-file-label"
+    });
+    chooseBtn.addEventListener("click", () => fileInput.click());
+    fileInput.addEventListener("change", async () => {
+      var _a;
+      const file = (_a = fileInput.files) == null ? void 0 : _a[0];
+      if (!file) return;
+      this.fileName = file.name;
+      fileLabel.setText(file.name);
+      try {
+        this.rawContent = await file.text();
+        await this.parseAndPreview();
+      } catch (e) {
+        new import_obsidian7.Notice(`Fehler beim Lesen der Datei: ${(e == null ? void 0 : e.message) || e}`);
+      }
+    });
+    const autoRow = fileSection.createDiv({ cls: "ttt-import-auto-row" });
+    autoRow.createEl("span", { text: "oder:", cls: "ttt-import-or" });
+    const autoBtn = autoRow.createEl("button", {
+      text: "\u{1F50D} Neuestes Backup automatisch erkennen",
+      cls: "ttt-btn-nav"
+    });
+    autoBtn.addEventListener("click", () => this.autoDetectBackup(fileLabel));
+    const previewSection = contentEl.createDiv({ cls: "ttt-import-section ttt-import-preview" });
+    previewSection.id = "ttt-import-preview-section";
+    if (!this.preview) previewSection.style.display = "none";
+    else this.renderPreview(previewSection);
+    const optionsSection = contentEl.createDiv({ cls: "ttt-import-section" });
+    optionsSection.createEl("h3", { text: "2. Import-Optionen" });
+    this.renderOptions(optionsSection);
+    const btnRow = contentEl.createDiv({ cls: "ttt-modal-buttons-split" });
+    const cancelBtn = btnRow.createEl("button", { text: "Abbrechen", cls: "ttt-btn-secondary" });
+    cancelBtn.addEventListener("click", () => this.close());
+    const importBtn = btnRow.createEl("button", {
+      text: this.preview ? `\u2705 ${this.preview.totalResultTasks} Aufgaben importieren` : "Importieren",
+      cls: "mod-cta ttt-btn-primary"
+    });
+    importBtn.disabled = !this.preview;
+    importBtn.addEventListener("click", () => this.executeImport(importBtn));
+  }
+  renderPreview(container) {
+    if (!this.preview) return;
+    container.empty();
+    container.style.display = "";
+    container.createEl("h3", { text: "\u{1F4CA} Vorschau" });
+    const kpiRow = container.createDiv({ cls: "ttt-kpi-row" });
+    const addKpi = (label, value, cls) => {
+      const card = kpiRow.createDiv({ cls: "ttt-kpi-card" });
+      card.createDiv({ text: label, cls: "ttt-kpi-label" });
+      card.createDiv({ text: value, cls: `ttt-kpi-value${cls ? " " + cls : ""}` });
+    };
+    addKpi("Rohe Aufgaben", String(this.preview.totalRawTasks));
+    addKpi("Nach Konsolidierung", String(this.preview.totalResultTasks), "ttt-kpi-highlight");
+    addKpi("Mit Zeitbuchungen", String(this.preview.tasksWithTime));
+    addKpi("Gesamtstunden", `${this.preview.totalHours.toFixed(1)} h`);
+    if (this.preview.earliestDate || this.preview.latestDate) {
+      const dateDiv = container.createDiv({ cls: "ttt-import-dates" });
+      dateDiv.setText(
+        `Zeitraum: ${this.preview.earliestDate || "?"} \u2013 ${this.preview.latestDate || "?"}`
+      );
+    }
+    if (this.preview.projects.length > 0) {
+      const pDiv = container.createDiv({ cls: "ttt-import-tags-row" });
+      pDiv.createEl("strong", { text: "Projekte \u2192 typ: " });
+      pDiv.createEl("span", { text: this.preview.projects.join(", ") });
+    }
+    if (this.preview.tags.length > 0) {
+      const tDiv = container.createDiv({ cls: "ttt-import-tags-row" });
+      tDiv.createEl("strong", { text: "Tags: " });
+      tDiv.createEl("span", { text: this.preview.tags.slice(0, 15).join(", ") + (this.preview.tags.length > 15 ? " \u2026" : "") });
+    }
+  }
+  renderOptions(container) {
+    const settings = this.getSettings();
+    const folderRow = container.createDiv({ cls: "ttt-import-option-row" });
+    folderRow.createEl("label", { text: "Ziel-Ordner:" });
+    const folderInput = folderRow.createEl("input", { type: "text" });
+    folderInput.value = this.options.targetFolder || settings.tasksFolder;
+    folderInput.addClass("ttt-input");
+    folderInput.addEventListener("change", () => {
+      this.options.targetFolder = folderInput.value.trim() || settings.tasksFolder;
+    });
+    const dupRow = container.createDiv({ cls: "ttt-import-option-row" });
+    dupRow.createEl("label", { text: "Duplikate:" });
+    const dupSelect = dupRow.createEl("select", { cls: "ttt-select" });
+    const dupOptions = [
+      ["merge_times", "Zeiten zusammenf\xFChren (empfohlen)"],
+      ["skip", "Vorhandene \xFCberspringen"],
+      ["overwrite", "\xDCberschreiben"]
+    ];
+    for (const [val, label] of dupOptions) {
+      const opt = dupSelect.createEl("option", { text: label });
+      opt.value = val;
+      if (val === this.options.duplicateHandling) opt.selected = true;
+    }
+    dupSelect.addEventListener("change", () => {
+      this.options.duplicateHandling = dupSelect.value;
+    });
+    const subRow = container.createDiv({ cls: "ttt-import-option-row" });
+    subRow.createEl("label", { text: "Teilaufgaben:" });
+    const subSelect = subRow.createEl("select", { cls: "ttt-select" });
+    const subOptions = [
+      ["merge_into_parent", "In Hauptaufgabe einrechnen (empfohlen)"],
+      ["separate_tasks", "Als eigene Aufgaben anlegen"]
+    ];
+    for (const [val, label] of subOptions) {
+      const opt = subSelect.createEl("option", { text: label });
+      opt.value = val;
+      if (val === this.options.subtaskStrategy) opt.selected = true;
+    }
+    subSelect.addEventListener("change", () => {
+      this.options.subtaskStrategy = subSelect.value;
+    });
+    const checkOptions = [
+      ["consolidateDuplicates", "Gleichnamige Aufgaben konsolidieren"],
+      ["includeArchived", "Archivierte Aufgaben einschlie\xDFen"],
+      ["projectAsType", "Projektname als 'Typ' \xFCbernehmen"],
+      ["recognizeCostCenter", "Kostenstelle aus Tags erkennen (z.B. CCC)"],
+      ["recognizeImportant", "Wichtig-Flag aus Tags erkennen"]
+    ];
+    for (const [key, label] of checkOptions) {
+      const row = container.createDiv({ cls: "ttt-import-check-row" });
+      const cb = row.createEl("input", { type: "checkbox" });
+      cb.checked = !!this.options[key];
+      row.createEl("label", { text: label });
+      cb.addEventListener("change", () => {
+        this.options[key] = cb.checked;
+        if (key === "consolidateDuplicates" || key === "subtaskStrategy" || key === "includeArchived") {
+          this.tryReparse();
+        }
+      });
+    }
+    const minHoursRow = container.createDiv({ cls: "ttt-import-option-row" });
+    minHoursRow.createEl("label", { text: "Mindest-Stunden (Aufgaben ohne Zeiten filtern):" });
+    const minHoursInput = minHoursRow.createEl("input", { type: "number" });
+    minHoursInput.value = String(this.options.minHoursFilter || 0);
+    minHoursInput.min = "0";
+    minHoursInput.step = "0.5";
+    minHoursInput.addClass("ttt-input");
+    minHoursInput.addEventListener("change", () => {
+      this.options.minHoursFilter = parseFloat(minHoursInput.value) || 0;
+    });
+  }
+  async tryReparse() {
+    if (!this.rawContent) return;
+    await this.parseAndPreview();
+  }
+  async parseAndPreview() {
+    if (!this.rawContent) return;
+    try {
+      this.preview = SuperProductivityImporter.parse(this.rawContent, this.options);
+      this.render();
+    } catch (e) {
+      new import_obsidian7.Notice(`Fehler beim Parsen: ${(e == null ? void 0 : e.message) || e}`);
+      this.preview = null;
+    }
+  }
+  async autoDetectBackup(fileLabel) {
+    const backupDir = (0, import_obsidian7.normalizePath)(
+      "~/.var/app/com.super_productivity.SuperProductivity/config/superProductivity/backups"
+    );
+    const expandedPath = "/home/" + (typeof process !== "undefined" ? process.env.USER || "user" : "user") + "/.var/app/com.super_productivity.SuperProductivity/config/superProductivity/backups";
+    new import_obsidian7.Notice(`Backup-Ordner: ${expandedPath}
+Bitte neuste Datei manuell w\xE4hlen.`, 8e3);
+    try {
+      const adapter = this.app.vault.adapter;
+      if (adapter && typeof adapter.list === "function") {
+        const result = await adapter.list(expandedPath);
+        if (result && result.files && result.files.length > 0) {
+          const sorted = result.files.sort().reverse();
+          const latest = sorted[0];
+          const content = await adapter.read(latest);
+          this.rawContent = content;
+          this.fileName = latest.split("/").pop() || latest;
+          fileLabel.setText(this.fileName);
+          await this.parseAndPreview();
+          new import_obsidian7.Notice(`\u2705 Backup geladen: ${this.fileName}`);
+        }
+      }
+    } catch (e) {
+    }
+  }
+  async executeImport(importBtn) {
+    var _a;
+    if (!this.preview || !this.rawContent) {
+      new import_obsidian7.Notice("Bitte zuerst eine Backup-Datei w\xE4hlen.");
+      return;
+    }
+    let tasks = this.preview.convertedTasks;
+    if (this.options.minHoursFilter > 0) {
+      tasks = tasks.filter((t) => {
+        const total = t.time_entries.reduce((s, e) => s + e.hours, 0);
+        return total >= this.options.minHoursFilter;
+      });
+    }
+    importBtn.disabled = true;
+    importBtn.setText("\u23F3 Importiere\u2026");
+    try {
+      const result = await this.taskService.saveImportedTasks(tasks, this.options);
+      new import_obsidian7.Notice(
+        `\u2705 Import abgeschlossen!
+Erstellt: ${result.created} | Zusammengef\xFChrt: ${result.merged} | \xDCbersprungen: ${result.skipped}`,
+        1e4
+      );
+      (_a = this.onImportDone) == null ? void 0 : _a.call(this);
+      this.close();
+    } catch (e) {
+      new import_obsidian7.Notice(`\u274C Fehler beim Import: ${(e == null ? void 0 : e.message) || e}`);
+      importBtn.disabled = false;
+      importBtn.setText("Importieren (erneut versuchen)");
+    }
+  }
+};
+
 // src/views/cockpit-view.ts
 var CockpitView = class {
   constructor(app, taskService, timerService, getSettings, onNavigateTab, containerEl) {
@@ -1210,6 +1885,14 @@ var CockpitView = class {
       });
       logTimeBtn.addEventListener("click", () => {
         new LogTimeModal(this.app, this.taskService, void 0, void 0, void 0, void 0, () => this.render()).open();
+      });
+      const importSpBtn = buttonGroup.createEl("button", {
+        text: "\u{1F4E5} SP-Import",
+        cls: "ttt-btn-secondary"
+      });
+      importSpBtn.setAttribute("aria-label", "Super Productivity Export importieren");
+      importSpBtn.addEventListener("click", () => {
+        new ImportSuperProductivityModal(this.app, this.taskService, this.getSettings, () => this.render()).open();
       });
       const calBtn = buttonGroup.createEl("button", { text: "\u{1F4C5} Kalender", cls: "ttt-btn-nav" });
       calBtn.addEventListener("click", () => this.onNavigateTab("calendar"));
@@ -1270,7 +1953,7 @@ var CockpitView = class {
         const startQuickTimerBtn = kpiTimer.createEl("button", { text: "\u25B6 Timer starten", cls: "ttt-btn-small" });
         startQuickTimerBtn.addEventListener("click", () => {
           if (tasks.length === 0) {
-            new import_obsidian7.Notice("Keine Aufgaben zum Starten eines Timers vorhanden.");
+            new import_obsidian8.Notice("Keine Aufgaben zum Starten eines Timers vorhanden.");
             return;
           }
           const firstActive = tasks.find((t) => t.status === "in_progress") || tasks[0];
@@ -1413,7 +2096,7 @@ var CockpitView = class {
     });
     btnPlusHalf.addEventListener("click", async () => {
       await this.taskService.quickLogHours(task.id, 0.5);
-      new import_obsidian7.Notice(`+0.5 Std. auf "${task.title}" gebucht!`);
+      new import_obsidian8.Notice(`+0.5 Std. auf "${task.title}" gebucht!`);
     });
     const btnPlusOne = actionRow.createEl("button", {
       text: "+1.0h",
@@ -1422,7 +2105,7 @@ var CockpitView = class {
     });
     btnPlusOne.addEventListener("click", async () => {
       await this.taskService.quickLogHours(task.id, 1);
-      new import_obsidian7.Notice(`+1.0 Std. auf "${task.title}" gebucht!`);
+      new import_obsidian8.Notice(`+1.0 Std. auf "${task.title}" gebucht!`);
     });
     const btnManage = actionRow.createEl("button", {
       text: `Buchungen (${task.time_entries.length})`,
@@ -1781,7 +2464,7 @@ ${grp.comments.join("\n") || "Kein Kommentar"}`
 };
 
 // src/views/history-view.ts
-var import_obsidian8 = require("obsidian");
+var import_obsidian9 = require("obsidian");
 var HistoryView = class {
   constructor(app, taskService, getSettings, onNavigateTab, containerEl) {
     this.groupingMode = "by_day";
@@ -2068,7 +2751,7 @@ var HistoryView = class {
         delBtn.addEventListener("click", async () => {
           if (confirm(`Zeiteintrag (${item.entry.hours}h am ${item.entry.date}) wirklich l\xF6schen?`)) {
             await this.taskService.deleteTimeEntry(item.task.id, item.entry.id);
-            new import_obsidian8.Notice("Zeiteintrag gel\xF6scht.");
+            new import_obsidian9.Notice("Zeiteintrag gel\xF6scht.");
             this.render();
           }
         });
@@ -2121,7 +2804,7 @@ var HistoryView = class {
         delBtn.addEventListener("click", async () => {
           if (confirm(`Zeiteintrag (${item.entry.hours}h am ${item.entry.date}) wirklich l\xF6schen?`)) {
             await this.taskService.deleteTimeEntry(item.task.id, item.entry.id);
-            new import_obsidian8.Notice("Zeiteintrag gel\xF6scht.");
+            new import_obsidian9.Notice("Zeiteintrag gel\xF6scht.");
             this.render();
           }
         });
@@ -2193,7 +2876,7 @@ var HistoryView = class {
   exportMarkdown(tasks) {
     const entries = this.getFilteredEntries(tasks);
     if (entries.length === 0) {
-      new import_obsidian8.Notice("Keine Daten zum Exportieren vorhanden.");
+      new import_obsidian9.Notice("Keine Daten zum Exportieren vorhanden.");
       return;
     }
     let md = `| Datum | Aufgabe | Typ | Kostenstelle | Tags | Stunden | Kommentar |
@@ -2210,12 +2893,12 @@ var HistoryView = class {
     md += `| **Gesamt** | | | | | **${total.toFixed(1)}** | |
 `;
     navigator.clipboard.writeText(md);
-    new import_obsidian8.Notice("Markdown-Tabelle in die Zwischenablage kopiert!");
+    new import_obsidian9.Notice("Markdown-Tabelle in die Zwischenablage kopiert!");
   }
   exportCsv(tasks) {
     const entries = this.getFilteredEntries(tasks);
     if (entries.length === 0) {
-      new import_obsidian8.Notice("Keine Daten zum Exportieren vorhanden.");
+      new import_obsidian9.Notice("Keine Daten zum Exportieren vorhanden.");
       return;
     }
     let csv = "Datum;Aufgabe;Typ;Kostenstelle;Tags;Stunden;Startzeit;Endzeit;Kommentar\n";
@@ -2231,7 +2914,7 @@ var HistoryView = class {
     a.download = `zeitbuchungen_${(/* @__PURE__ */ new Date()).toISOString().slice(0, 10)}.csv`;
     a.click();
     URL.revokeObjectURL(url);
-    new import_obsidian8.Notice("CSV-Datei erfolgreich exportiert!");
+    new import_obsidian9.Notice("CSV-Datei erfolgreich exportiert!");
   }
   formatGermanDate(isoStr) {
     if (!isoStr) return "";
@@ -2245,7 +2928,7 @@ var HistoryView = class {
 
 // src/views/tracker-view.ts
 var VIEW_TYPE_TASK_TRACKER = "task-time-tracker-view";
-var TrackerView = class extends import_obsidian9.ItemView {
+var TrackerView = class extends import_obsidian10.ItemView {
   constructor(leaf, taskService, timerService, getSettings) {
     super(leaf);
     this.currentTab = "cockpit";
@@ -2349,7 +3032,7 @@ var TrackerView = class extends import_obsidian9.ItemView {
 };
 
 // src/main.ts
-var TaskTimeTrackerPlugin = class extends import_obsidian10.Plugin {
+var TaskTimeTrackerPlugin = class extends import_obsidian11.Plugin {
   constructor() {
     super(...arguments);
     this.settings = DEFAULT_SETTINGS;
@@ -2391,6 +3074,13 @@ var TaskTimeTrackerPlugin = class extends import_obsidian10.Plugin {
       }
     });
     this.addCommand({
+      id: "import-super-productivity",
+      name: "Super Productivity Export importieren",
+      callback: () => {
+        new ImportSuperProductivityModal(this.app, this.taskService, () => this.settings).open();
+      }
+    });
+    this.addCommand({
       id: "toggle-timer",
       name: "Live-Timer umschalten (Start / Pause / Stopp)",
       callback: async () => {
@@ -2401,14 +3091,14 @@ var TaskTimeTrackerPlugin = class extends import_obsidian10.Plugin {
           if (first) {
             await this.timerService.startTimer(first);
           } else {
-            new import_obsidian10.Notice("Keine Aufgaben zum Starten des Timers vorhanden.");
+            new import_obsidian11.Notice("Keine Aufgaben zum Starten des Timers vorhanden.");
           }
         } else if (active.running) {
           await this.timerService.pauseTimer();
-          new import_obsidian10.Notice("Timer pausiert.");
+          new import_obsidian11.Notice("Timer pausiert.");
         } else {
           await this.timerService.resumeTimer();
-          new import_obsidian10.Notice("Timer fortgesetzt.");
+          new import_obsidian11.Notice("Timer fortgesetzt.");
         }
       }
     });
@@ -2475,21 +3165,21 @@ var TaskTimeTrackerPlugin = class extends import_obsidian10.Plugin {
     });
     this.registerEvent(
       this.app.vault.on("modify", (file) => {
-        if (!this.taskService.isInternalUpdating && file instanceof import_obsidian10.TFile && file.path.startsWith(this.settings.tasksFolder)) {
+        if (!this.taskService.isInternalUpdating && file instanceof import_obsidian11.TFile && file.path.startsWith(this.settings.tasksFolder)) {
           this.taskService.notifyChange();
         }
       })
     );
     this.registerEvent(
       this.app.vault.on("create", (file) => {
-        if (file instanceof import_obsidian10.TFile && file.path.startsWith(this.settings.tasksFolder)) {
+        if (file instanceof import_obsidian11.TFile && file.path.startsWith(this.settings.tasksFolder)) {
           this.taskService.notifyChange();
         }
       })
     );
     this.registerEvent(
       this.app.vault.on("delete", (file) => {
-        if (file instanceof import_obsidian10.TFile && file.path.startsWith(this.settings.tasksFolder)) {
+        if (file instanceof import_obsidian11.TFile && file.path.startsWith(this.settings.tasksFolder)) {
           this.taskService.notifyChange();
         }
       })
@@ -2527,7 +3217,7 @@ var TaskTimeTrackerPlugin = class extends import_obsidian10.Plugin {
     await this.saveData(this.settings);
   }
 };
-var TaskTimeTrackerSettingTab = class extends import_obsidian10.PluginSettingTab {
+var TaskTimeTrackerSettingTab = class extends import_obsidian11.PluginSettingTab {
   constructor(app, plugin) {
     super(app, plugin);
     this.plugin = plugin;
@@ -2536,14 +3226,14 @@ var TaskTimeTrackerSettingTab = class extends import_obsidian10.PluginSettingTab
     const { containerEl } = this;
     containerEl.empty();
     containerEl.createEl("h2", { text: "Einstellungen: Task & Time Tracker" });
-    new import_obsidian10.Setting(containerEl).setName("Aufgaben-Ordner (Tasks Folder)").setDesc("Der Ordner im Vault, in dem alle Aufgaben als Markdown-Dateien gespeichert werden.").addText((text) => {
+    new import_obsidian11.Setting(containerEl).setName("Aufgaben-Ordner (Tasks Folder)").setDesc("Der Ordner im Vault, in dem alle Aufgaben als Markdown-Dateien gespeichert werden.").addText((text) => {
       text.setValue(this.plugin.settings.tasksFolder).onChange(async (val) => {
         this.plugin.settings.tasksFolder = val.trim() || "Tasks";
         await this.plugin.saveSettings();
         this.plugin.taskService.notifyChange();
       });
     });
-    new import_obsidian10.Setting(containerEl).setName("Standard-Budget (Stunden)").setDesc("Voreingestellte gesch\xE4tzte Stundenzahl f\xFCr neue Aufgaben.").addText((text) => {
+    new import_obsidian11.Setting(containerEl).setName("Standard-Budget (Stunden)").setDesc("Voreingestellte gesch\xE4tzte Stundenzahl f\xFCr neue Aufgaben.").addText((text) => {
       text.inputEl.type = "number";
       text.setValue(String(this.plugin.settings.defaultEstimatedHours)).onChange(async (val) => {
         const num = parseFloat(val);
@@ -2553,14 +3243,14 @@ var TaskTimeTrackerSettingTab = class extends import_obsidian10.PluginSettingTab
         }
       });
     });
-    new import_obsidian10.Setting(containerEl).setName("Kostenstellen (Auswahlliste)").setDesc("Kommagetrennte Liste der verf\xFCgbaren Kostenstellen.").addTextArea((text) => {
+    new import_obsidian11.Setting(containerEl).setName("Kostenstellen (Auswahlliste)").setDesc("Kommagetrennte Liste der verf\xFCgbaren Kostenstellen.").addTextArea((text) => {
       text.setValue(this.plugin.settings.costCenters.join(", ")).onChange(async (val) => {
         this.plugin.settings.costCenters = val.split(",").map((k) => k.trim()).filter(Boolean);
         await this.plugin.saveSettings();
       });
       text.inputEl.rows = 2;
     });
-    new import_obsidian10.Setting(containerEl).setName("Aufgabentypen (Auswahlliste)").setDesc("Kommagetrennte Liste der verf\xFCgbaren Aufgabentypen.").addTextArea((text) => {
+    new import_obsidian11.Setting(containerEl).setName("Aufgabentypen (Auswahlliste)").setDesc("Kommagetrennte Liste der verf\xFCgbaren Aufgabentypen.").addTextArea((text) => {
       text.setValue(this.plugin.settings.taskTypes.join(", ")).onChange(async (val) => {
         this.plugin.settings.taskTypes = val.split(",").map((t) => t.trim()).filter(Boolean);
         await this.plugin.saveSettings();

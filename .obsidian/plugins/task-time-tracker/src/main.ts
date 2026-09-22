@@ -21,6 +21,7 @@ import { CalendarView } from "./views/calendar-view";
 import { HistoryView } from "./views/history-view";
 import { CreateTaskModal } from "./modals/create-task-modal";
 import { LogTimeModal } from "./modals/log-time-modal";
+import { ImportSuperProductivityModal } from "./modals/import-super-productivity-modal";
 
 export default class TaskTimeTrackerPlugin extends Plugin {
 	settings: PluginSettings = DEFAULT_SETTINGS;
@@ -72,6 +73,14 @@ export default class TaskTimeTrackerPlugin extends Plugin {
 			name: "Zeit auf Aufgabe buchen",
 			callback: () => {
 				new LogTimeModal(this.app, this.taskService).open();
+			},
+		});
+
+		this.addCommand({
+			id: "import-super-productivity",
+			name: "Super Productivity Export importieren",
+			callback: () => {
+				new ImportSuperProductivityModal(this.app, this.taskService, () => this.settings).open();
 			},
 		});
 
