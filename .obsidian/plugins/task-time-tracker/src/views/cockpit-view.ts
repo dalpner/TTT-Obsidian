@@ -253,12 +253,38 @@ export class CockpitView {
 			return;
 		}
 
+		const cards: HTMLElement[] = [];
 		for (const task of filtered) {
-			this.renderTaskCard(container, task);
+			cards.push(this.renderTaskCard(container, task));
 		}
+
+		this.applyScrollLimit(container, cards);
 	}
 
-	private renderTaskCard(container: HTMLElement, task: TaskItem) {
+	/**
+	 * Begrenzt die sichtbare Höhe der Aufgabenliste auf die in den Einstellungen
+	 * konfigurierte Anzahl an Karten und aktiviert bei Bedarf eine Scroll-Funktion,
+	 * damit die Datei bei vielen Aufgaben nicht endlos lang wird.
+	 */
+	private applyScrollLimit(container: HTMLElement, cards: HTMLElement[]) {
+		const maxItems = this.getSettings().cockpitMaxVisibleItems;
+
+		if (!maxItems || maxItems <= 0 || cards.length <= maxItems) {
+			container.removeClass("ttt-task-list-scrollable");
+			container.style.maxHeight = "";
+			return;
+		}
+
+		container.addClass("ttt-task-list-scrollable");
+
+		const containerRect = container.getBoundingClientRect();
+		const lastVisibleCard = cards[maxItems - 1];
+		const cardRect = lastVisibleCard.getBoundingClientRect();
+		const maxHeight = cardRect.bottom - containerRect.top;
+		container.style.maxHeight = `${Math.max(maxHeight, 0)}px`;
+	}
+
+	private renderTaskCard(container: HTMLElement, task: TaskItem): HTMLElement {
 		const card = container.createDiv({
 			cls: `ttt-task-card status-${task.status} ${task.wichtig ? "is-important" : ""}`
 		});
@@ -424,5 +450,7 @@ export class CockpitView {
 		openNoteBtn.addEventListener("click", () => {
 			this.app.workspace.getLeaf(false).openFile(task.file);
 		});
+
+		return card;
 	}
 }

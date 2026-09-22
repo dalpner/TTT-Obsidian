@@ -61,6 +61,8 @@ export interface PluginSettings {
 	costCenters: string[];
 	taskTypes: string[];
 	activeTimer: ActiveTimer | null;
+	/** Maximale Anzahl an Aufgaben, die in der Cockpit-Ansicht ohne Scrollen angezeigt werden. 0 = unbegrenzt. */
+	cockpitMaxVisibleItems: number;
 }
 
 export const DEFAULT_SETTINGS: PluginSettings = {
@@ -70,6 +72,7 @@ export const DEFAULT_SETTINGS: PluginSettings = {
 	costCenters: ["KST-1000", "KST-2000", "KST-3000", "KST-4020", "Allgemein"],
 	taskTypes: ["Feature", "Bug", "Meeting", "Konzeption", "Wartung", "Dokumentation", "Support"],
 	activeTimer: null,
+	cockpitMaxVisibleItems: 20,
 };
 
 export type ViewTab = "cockpit" | "calendar" | "history";

@@ -304,5 +304,22 @@ class TaskTimeTrackerSettingTab extends PluginSettingTab {
 					});
 				text.inputEl.rows = 2;
 			});
+
+		new Setting(containerEl)
+			.setName("Max. sichtbare Aufgaben im Cockpit")
+			.setDesc("Maximale Anzahl an Aufgabenkarten, die in der Cockpit-Ansicht ohne Scrollen angezeigt werden. Bei mehr Aufgaben wird die Liste scrollbar. 0 = unbegrenzt (kein Scrollen).")
+			.addText(text => {
+				text.inputEl.type = "number";
+				text.inputEl.min = "0";
+				text.setValue(String(this.plugin.settings.cockpitMaxVisibleItems))
+					.onChange(async (val) => {
+						const num = parseInt(val, 10);
+						if (!isNaN(num) && num >= 0) {
+							this.plugin.settings.cockpitMaxVisibleItems = num;
+							await this.plugin.saveSettings();
+							this.plugin.taskService.notifyChange();
+						}
+					});
+			});
 	}
 }
