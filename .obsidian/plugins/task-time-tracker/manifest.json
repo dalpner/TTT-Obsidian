@@ -1,0 +1,9 @@
+{
+  "id": "task-time-tracker",
+  "name": "Task & Time Tracker",
+  "version": "1.0.0",
+  "minAppVersion": "0.15.0",
+  "description": "Umfassender Task-Tracker mit Kalender, Multi-Day-Support, Zeiterfassung, Historie und flexiblen Auswertungen.",
+  "author": "Antigravity",
+  "isDesktopOnly": false
+}
