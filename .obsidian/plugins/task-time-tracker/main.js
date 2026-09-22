@@ -1590,6 +1590,7 @@ var ImportSuperProductivityModal = class extends import_obsidian7.Modal {
     this.preview = null;
     this.rawContent = null;
     this.fileName = "";
+    this.parseError = null;
     this.taskService = taskService;
     this.getSettings = getSettings;
     this.onImportDone = onImportDone;
@@ -1646,6 +1647,11 @@ var ImportSuperProductivityModal = class extends import_obsidian7.Modal {
       cls: "ttt-btn-nav"
     });
     autoBtn.addEventListener("click", () => this.autoDetectBackup(fileLabel));
+    if (this.parseError) {
+      const errorBanner = contentEl.createDiv({ cls: "ttt-import-error-banner" });
+      errorBanner.createEl("strong", { text: "\u26A0\uFE0F Import nicht m\xF6glich: " });
+      errorBanner.createEl("span", { text: this.parseError });
+    }
     const previewSection = contentEl.createDiv({ cls: "ttt-import-section ttt-import-preview" });
     previewSection.id = "ttt-import-preview-section";
     if (!this.preview) previewSection.style.display = "none";
@@ -1774,11 +1780,14 @@ var ImportSuperProductivityModal = class extends import_obsidian7.Modal {
     if (!this.rawContent) return;
     try {
       this.preview = SuperProductivityImporter.parse(this.rawContent, this.options);
-      this.render();
+      this.parseError = null;
     } catch (e) {
-      new import_obsidian7.Notice(`Fehler beim Parsen: ${(e == null ? void 0 : e.message) || e}`);
+      const message = (e == null ? void 0 : e.message) || String(e);
+      new import_obsidian7.Notice(`Fehler beim Parsen: ${message}`);
       this.preview = null;
+      this.parseError = message;
     }
+    this.render();
   }
   async autoDetectBackup(fileLabel) {
     const backupDir = (0, import_obsidian7.normalizePath)(

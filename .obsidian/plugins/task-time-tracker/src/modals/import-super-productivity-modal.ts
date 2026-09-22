@@ -12,6 +12,7 @@ export class ImportSuperProductivityModal extends Modal {
 	private options: SPImportOptions;
 	private rawContent: string | null = null;
 	private fileName: string = "";
+	private parseError: string | null = null;
 
 	constructor(
 		app: App,
@@ -91,6 +92,12 @@ export class ImportSuperProductivityModal extends Modal {
 		autoBtn.addEventListener("click", () => this.autoDetectBackup(fileLabel));
 
 		// Preview section (hidden initially)
+		if (this.parseError) {
+			const errorBanner = contentEl.createDiv({ cls: "ttt-import-error-banner" });
+			errorBanner.createEl("strong", { text: "⚠️ Import nicht möglich: " });
+			errorBanner.createEl("span", { text: this.parseError });
+		}
+
 		const previewSection = contentEl.createDiv({ cls: "ttt-import-section ttt-import-preview" });
 		previewSection.id = "ttt-import-preview-section";
 		if (!this.preview) previewSection.style.display = "none";
@@ -244,11 +251,14 @@ export class ImportSuperProductivityModal extends Modal {
 		if (!this.rawContent) return;
 		try {
 			this.preview = SuperProductivityImporter.parse(this.rawContent, this.options);
-			this.render();
+			this.parseError = null;
 		} catch (e: any) {
-			new Notice(`Fehler beim Parsen: ${e?.message || e}`);
+			const message = e?.message || String(e);
+			new Notice(`Fehler beim Parsen: ${message}`);
 			this.preview = null;
+			this.parseError = message;
 		}
+		this.render();
 	}
 
 	private async autoDetectBackup(fileLabel: HTMLElement) {

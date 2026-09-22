@@ -869,3 +869,13 @@
 	border: 1px dashed var(--background-modifier-border);
 }
 
+
+/* Super Productivity Import Modal */
+.ttt-import-error-banner {
+	background: var(--background-modifier-error, #4a2020);
+	color: var(--text-error, #ff6b6b);
+	border: 1px solid var(--text-error, #ff6b6b);
+	border-radius: var(--radius-m, 6px);
+	padding: 10px 14px;
+	margin-bottom: 16px;
+}
