@@ -237,6 +237,11 @@
 	gap: 12px;
 }
 
+.ttt-task-list-scrollable {
+	overflow-y: auto;
+	padding-right: 4px;
+}
+
 .ttt-task-card {
 	background: var(--background-primary);
 	border: 1px solid var(--background-modifier-border);
